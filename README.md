@@ -2,5 +2,4 @@
 
 disclaimer: for authorized security testing only
 
-
-for nightmare xo
+Rewriting ROGUE botnet in C++ for nightmare xo
