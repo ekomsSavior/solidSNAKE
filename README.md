@@ -1,4 +1,4 @@
-# nightmare xo
+# 4nightmare xo
 # solidSNAKE
 
 A C++ rewrite of the ROGUE botnet, w/ integrated C2, mesh networking, and a modular payload system. Built for authorized security testing, red team operations, and defensive research.
