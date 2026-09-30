@@ -1,0 +1,4 @@
+#ifndef SNAKE_WIN32_SYS_WAIT_H
+#define SNAKE_WIN32_SYS_WAIT_H
+
+#endif  // SNAKE_WIN32_SYS_WAIT_H
