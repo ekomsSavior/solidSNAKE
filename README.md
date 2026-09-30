@@ -1,7 +1,7 @@
 # nightmare xo
 # solidSNAKE
 
-A C++ rewrite of the ROGUE botnet framework, featuring an integrated command-and-control (C2) server, mesh networking, and a modular payload system. Built for authorized security testing, red team operations, and defensive research.
+A C++ rewrite of the ROGUE botnet, w/ integrated C2, mesh networking, and a modular payload system. Built for authorized security testing, red team operations, and defensive research.
 
 > **Disclaimer:** This project is provided for authorized security testing and educational purposes only. Do not use it on systems you do not own or have explicit permission to test.
 
