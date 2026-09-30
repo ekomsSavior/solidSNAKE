@@ -1,7 +1,7 @@
 # 4Nightmare xo
 # solidSNAKE
 
-![Uploading com.png…]()
+<img width="2172" height="724" alt="logowhite" src="https://github.com/user-attachments/assets/ec984608-d3db-48ed-9f52-a6fd62ac4027" />
 
 
 A C++ rewrite of my ROGUE botnet, integrated C2, mesh networking, and a modular payload system. Built for authorized security testing, red team operations, and defensive research.
